@@ -70,7 +70,7 @@ liquidez el costo real de entrar y salir es varios %. Leerlos como cota superior
 | Código local | `/home/calvop/meme-detector/` |
 | Contenedor | `meme-detector` |
 | Volumen | `memedetector_data` → `/data` (`detector.db` WAL, `alerts.csv`, `status.json`, `heartbeat`, `detector.log`) |
-| GitHub | `github.com/calvopa/meme-detector` (privado) |
+| GitHub | `github.com/calvopa/me-detector` (privado) |
 
 Carga mínima: ~10 llamadas HTTP por ciclo de 3 min + SQLite.
 
@@ -111,6 +111,6 @@ Cambiar un umbral: editar `.env` en el server y `docker compose up -d` (no `rest
 
 ## Pendiente
 
-- Integrar al dashboard de cryptobot (pestaña + tarjetas) cuando haya datos.
+- ~~Integrar al dashboard de cryptobot~~ hecho 30/10/2026: pestaña **Memecoins**, tarjeta Bot 8 en Comparación y tarjeta en Resumen (color `--pink`). El dashboard monta `memedetector_data` read-only en `/memes_data` y expone `/api/memes/status` y `/api/memes/daily`. Si cambia el formato de `status.json`/`alerts.csv`, revisar `dashboard.py` de cryptobot.
 - Llevar los avisos al signal-auditor como fuente, con GeckoTerminal como venue nueva.
 - Calibrar umbrales con el embudo de `status.json` después de 3-4 semanas.
