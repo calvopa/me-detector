@@ -1,0 +1,17 @@
+# Secretos — nunca commitear
+.env
+
+# Runtime
+detector.db
+detector.db-*
+status.json
+alerts.csv
+heartbeat
+*.tmp
+detector.log
+detector.log.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/

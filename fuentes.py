@@ -1,0 +1,127 @@
+"""Clientes de las APIs públicas: GeckoTerminal (descubrimiento + velas), DexScreener (métricas
+de mercado en lote) y RugCheck (seguridad del token). Sin claves."""
+import time
+
+import requests
+
+import config
+
+_session = requests.Session()
+_session.headers["accept"] = "application/json"
+_ultimo: dict[str, float] = {}
+
+# Tokens de cotización: nunca son candidatos
+QUOTE_MINTS = {
+    "So11111111111111111111111111111111111111112",   # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+}
+
+
+def _get(api: str, url: str, params: dict | None = None, intentos: int = 3):
+    for i in range(intentos):
+        espera = config.THROTTLE_S[api] - (time.time() - _ultimo.get(api, 0))
+        if espera > 0:
+            time.sleep(espera)
+        _ultimo[api] = time.time()
+        try:
+            r = _session.get(url, params=params, timeout=20)
+            if r.status_code == 429:
+                time.sleep(15 * (i + 1))
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.RequestException:
+            if i == intentos - 1:
+                raise
+            time.sleep(2 * (i + 1))
+    raise requests.exceptions.RequestException(f"{api}: rate limit persistente")
+
+
+# ── GeckoTerminal ─────────────────────────────────────────────────────────────
+
+def _mints_de_pools(data: list) -> set[str]:
+    out = set()
+    for p in data:
+        mint = p["relationships"]["base_token"]["data"]["id"].split("_", 1)[1]
+        if mint not in QUOTE_MINTS:
+            out.add(mint)
+    return out
+
+
+def descubrir() -> set[str]:
+    """Mints candidatos: pools nuevos, pools en tendencia (1h) y los de PumpSwap con más
+    operaciones (ahí caen los tokens recién graduados de pump.fun)."""
+    base = f"{config.GECKOTERMINAL_API}/networks/solana"
+    pedidos = [(f"{base}/new_pools", {"page": p}) for p in range(1, config.GT_NEW_POOLS_PAGES + 1)]
+    pedidos += [(f"{base}/trending_pools", {"duration": "1h", "page": p})
+                for p in range(1, config.GT_TRENDING_PAGES + 1)]
+    pedidos += [(f"{base}/dexes/pumpswap/pools", {"sort": "h24_tx_count_desc", "page": p}) for p in (1, 2)]
+    mints = set()
+    for url, params in pedidos:
+        try:
+            mints |= _mints_de_pools(_get("gt", url, params).get("data", []))
+        except requests.exceptions.RequestException:
+            continue  # una página caída no frena el resto
+    return mints
+
+
+def velas(pool: str, desde_s: int, hasta_s: int) -> list[dict]:
+    """Velas de 15 min del pool entre desde_s y hasta_s (precio del token base en USD)."""
+    n = min(1000, int((hasta_s - desde_s) / 900) + 2)
+    d = _get("gt", f"{config.GECKOTERMINAL_API}/networks/solana/pools/{pool}/ohlcv/minute",
+             {"aggregate": 15, "before_timestamp": hasta_s, "limit": n})
+    lista = d["data"]["attributes"]["ohlcv_list"]
+    return [{"t": v[0], "o": v[1], "h": v[2], "l": v[3], "c": v[4]}
+            for v in sorted(lista) if v[0] + 900 > desde_s]
+
+
+# ── DexScreener ───────────────────────────────────────────────────────────────
+
+def mercado(mints: list[str]) -> dict[str, dict]:
+    """{mint: métricas} sumando todos los pares del token. Liquidez solo de pares que la informan
+    (las curvas de bonding no la informan)."""
+    out: dict[str, dict] = {}
+    for i in range(0, len(mints), 30):
+        lote = mints[i:i + 30]
+        try:
+            pares = _get("ds", f"{config.DEXSCREENER_API}/tokens/v1/solana/{','.join(lote)}")
+        except requests.exceptions.RequestException:
+            continue
+        for p in pares or []:
+            mint = p["baseToken"]["address"]
+            if mint not in lote:
+                continue  # el token aparece como cotización de otro par
+            m = out.setdefault(mint, {"mint": mint, "symbol": p["baseToken"].get("symbol"),
+                                      "name": p["baseToken"].get("name"), "liq": 0.0, "vol_h1": 0.0,
+                                      "buys_h1": 0, "sells_h1": 0, "creado_ms": None, "par": None})
+            h1 = (p.get("txns") or {}).get("h1") or {}
+            m["vol_h1"] += float((p.get("volume") or {}).get("h1") or 0)
+            m["buys_h1"] += int(h1.get("buys") or 0)
+            m["sells_h1"] += int(h1.get("sells") or 0)
+            if p.get("pairCreatedAt"):
+                m["creado_ms"] = min(m["creado_ms"] or p["pairCreatedAt"], p["pairCreatedAt"])
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            if liq > m["liq"]:
+                # el par con más liquidez manda el precio, el FDV y el pool que se sigue
+                m.update(liq=liq, par=p["pairAddress"], dex=p.get("dexId"),
+                         precio=float(p.get("priceUsd") or 0), fdv=p.get("fdv"))
+    return out
+
+
+# ── RugCheck ──────────────────────────────────────────────────────────────────
+
+def seguridad(mint: str) -> dict:
+    d = _get("rc", f"{config.RUGCHECK_API}/tokens/{mint}/report")
+    conocidas = d.get("knownAccounts") or {}
+    holders = [h for h in d.get("topHolders") or []
+               if (conocidas.get(h["owner"]) or {}).get("type") not in ("AMM", "LOCKER")]
+    return {
+        "holders": d.get("totalHolders") or 0,
+        "top10": round(sum(h["pct"] for h in holders[:10]), 1),
+        "mint_auth": d.get("mintAuthority"),
+        "freeze_auth": d.get("freezeAuthority"),
+        "rugged": bool(d.get("rugged")),
+        "dangers": [r["name"] for r in d.get("risks") or [] if r.get("level") == "danger"],
+        "warns": [r["name"] for r in d.get("risks") or [] if r.get("level") == "warn"],
+    }

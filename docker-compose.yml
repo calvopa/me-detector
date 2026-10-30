@@ -1,0 +1,20 @@
+services:
+  detector:
+    build: .
+    container_name: meme-detector
+    command: python bot.py
+    env_file: .env
+    environment:
+      - RUNTIME_DIR=/data
+    volumes:
+      - memedetector_data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  memedetector_data:
+    name: memedetector_data
