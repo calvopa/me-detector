@@ -22,7 +22,7 @@ mercado()    DexScreener /tokens/v1/solana (lotes de 30): liquidez, vol 1h, comp
 seguridad()  RugCheck /tokens/{mint}/report (cacheado RUGCHECK_TTL_MIN)
     └── filtro_seguridad: sin mint/freeze authority, sin riesgos "danger", ≥ 300 holders,
         top10 ≤ 30% (sin contar cuentas AMM/LOCKER de knownAccounts), no rugged
-avisar()     alerts + Telegram (una vez por token)
+avisar()     alerts + Telegram (una vez por token), con DEX por liquidez, CEX según CoinGecko y link a Jupiter
 seguimiento  snapshots DexScreener cada ciclo (precio, liquidez, rug) + al cumplirse cada horizonte,
              velas de 15 min de GeckoTerminal → cierre, máximo y mínimo exactos
 ```
@@ -59,8 +59,10 @@ liquidez el costo real de entrar y salir es varios %. Leerlos como cota superior
 | API | Uso | Límite / gotcha |
 |---|---|---|
 | GeckoTerminal `api.geckoterminal.com/api/v2` | descubrimiento + velas OHLCV | ~30/min (429 al pasarse; throttle 2.2s). `new_pools` hasta página 10. Velas: `/pools/{pool}/ohlcv/minute?aggregate=15&before_timestamp=…`, más nueva primero |
-| DexScreener `api.dexscreener.com/tokens/v1/solana/{mints}` | métricas, hasta 30 mints por llamada | 300/min. Un mint puede aparecer como *quote* de otro par: filtrar por `baseToken.address` |
+| DexScreener `api.dexscreener.com/tokens/v1/solana/{mints}` | métricas, hasta 30 mints por llamada | 300/min. Un mint puede aparecer como *quote* de otro par: filtrar por `baseToken.address`. Devuelve **un solo par por token** (visto el 04/11/2026) |
+| DexScreener `api.dexscreener.com/token-pairs/v1/solana/{mint}` | todos los pools del token, para la línea DEX del aviso | hasta 30 pools; incluye la curva (`pumpfun`, sin liquidez) |
 | RugCheck `api.rugcheck.xyz/v1/tokens/{mint}/report` | seguridad | sin límite documentado; throttle 1.5s y caché de 30 min por token |
+| CoinGecko `api.coingecko.com/api/v3/coins/solana/contract/{mint}` | CEX del aviso (solo los de `CEX_CONOCIDOS`) | sin clave ~10/min (429 → "CEX: sin dato"; throttle 6s, un intento). 404 = no listado → "CEX: ninguno" |
 
 ## Infraestructura
 
@@ -104,7 +106,7 @@ Cambiar un umbral: editar `.env` en el server y `docker compose up -d` (no `rest
 | Archivo | Rol |
 |---|---|
 | `config.py` | Umbrales vía `os.getenv()` |
-| `fuentes.py` | Clientes GeckoTerminal / DexScreener / RugCheck con throttle por API |
+| `fuentes.py` | Clientes GeckoTerminal / DexScreener / RugCheck / CoinGecko con throttle por API |
 | `engine.py` | Filtros, snapshots, cierre de horizontes con velas, estadísticas |
 | `db.py` | SQLite: `watch` (lista de observación + motivo de descarte), `alerts` (avisos + resultados), `state` |
 | `bot.py` | Loop, Telegram (solo envío), `alerts.csv`, `status.json`, heartbeat |

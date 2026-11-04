@@ -42,6 +42,7 @@ ART = timezone(timedelta(hours=-3))
 
 CSV_COLS = ["ts", "symbol", "name", "mint", "pool", "dex", "precio", "liq", "vol_h1", "fdv", "holders",
             "top10", "edad_min", "r1h", "r6h", "r24h", "r7d", "max_pct", "min_pct", "rug_ts"]
+DEX_NOMBRES = {"pumpswap": "PumpSwap", "raydium": "Raydium", "meteora": "Meteora", "orca": "Orca"}
 
 
 def _escribir_atomico(path: Path, texto: str):
@@ -80,19 +81,33 @@ def _pct(x):
     return "—" if x is None else f"{x:+.0f}%"
 
 
-def texto_aviso(m: dict, s: dict, edad_min: float) -> str:
+def _dexes(liq_dex: dict[str, float]) -> str:
+    orden = sorted(liq_dex.items(), key=lambda d: -d[1])
+    return " · ".join(f"{html.escape(DEX_NOMBRES.get(dex, dex))} {_usd(liq)}" for dex, liq in orden)
+
+
+def _cex(cex: list[str] | None) -> str:
+    if cex is None:
+        return "sin dato"
+    return ", ".join(cex) or "ninguno"
+
+
+def texto_aviso(m: dict, s: dict, edad_min: float, liq_dex: dict[str, float], cex: list[str] | None) -> str:
     sym = html.escape(m.get("symbol") or "?")
     nombre = html.escape(m.get("name") or "")
     avisos = f"\n⚠️ {html.escape(', '.join(s['warns']))}" if s["warns"] else ""
     return (
         f"🔎 <b>Memecoin: ${sym}</b> — {nombre}\n"
-        f"Edad {edad_min / 60:.1f}h · {m.get('dex')}\n"
+        f"Edad {edad_min / 60:.1f}h\n"
+        f"DEX: {_dexes(liq_dex)}\n"
+        f"CEX: {_cex(cex)}\n"
         f"Liquidez {_usd(m['liq'])} · Vol 1h {_usd(m['vol_h1'])} · FDV {_usd(m.get('fdv'))}\n"
         f"Compras/ventas 1h: {m['buys_h1']}/{m['sells_h1']}\n"
         f"Holders {s['holders']} · Top10 {s['top10']:.0f}%{avisos}\n"
         f"<code>{m['mint']}</code>\n"
         f"<a href=\"https://dexscreener.com/solana/{m['par']}\">DexScreener</a> · "
-        f"<a href=\"https://rugcheck.xyz/tokens/{m['mint']}\">RugCheck</a>\n"
+        f"<a href=\"https://rugcheck.xyz/tokens/{m['mint']}\">RugCheck</a> · "
+        f"<a href=\"https://jup.ag/tokens/{m['mint']}\">Jupiter</a>\n"
         f"<i>Solo detección — no es recomendación de compra</i>"
     )
 
@@ -166,7 +181,9 @@ def avisar(con, m: dict, s: dict, ahora_ms: int):
          m["precio"], m["liq"]))
     log.info("Aviso: %s %s liq=%.0f vol1h=%.0f holders=%s top10=%s", m.get("symbol"), m["mint"],
              m["liq"], m["vol_h1"], s["holders"], s["top10"])
-    telegram(texto_aviso(m, s, edad_min))
+    # si falla la consulta de pools, al menos el DEX principal que ya se conoce
+    liq_dex = fuentes.dexes(m["mint"]) or {m.get("dex") or "?": m["liq"]}
+    telegram(texto_aviso(m, s, edad_min, liq_dex, fuentes.cex(m["mint"])))
 
 
 def escribir_salidas(con, embudo: dict):

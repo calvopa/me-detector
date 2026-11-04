@@ -32,8 +32,9 @@ RUG_LIQ_FRAC = float(os.getenv("RUG_LIQ_FRAC", "0.2"))
 GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2"
 DEXSCREENER_API = "https://api.dexscreener.com"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1"
-# Espera mínima entre llamadas a cada API (GeckoTerminal free: ~30/min)
-THROTTLE_S = {"gt": 2.2, "ds": 0.3, "rc": 1.5}
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+# Espera mínima entre llamadas a cada API (GeckoTerminal free: ~30/min; CoinGecko sin clave: ~10/min)
+THROTTLE_S = {"gt": 2.2, "ds": 0.3, "rc": 1.5, "cg": 6.0}
 GT_NEW_POOLS_PAGES = int(os.getenv("GT_NEW_POOLS_PAGES", "3"))
 GT_TRENDING_PAGES = int(os.getenv("GT_TRENDING_PAGES", "2"))
 

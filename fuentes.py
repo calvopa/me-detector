@@ -1,5 +1,5 @@
 """Clientes de las APIs públicas: GeckoTerminal (descubrimiento + velas), DexScreener (métricas
-de mercado en lote) y RugCheck (seguridad del token). Sin claves."""
+de mercado en lote), RugCheck (seguridad del token) y CoinGecko (exchanges centralizados). Sin claves."""
 import time
 
 import requests
@@ -15,6 +15,12 @@ QUOTE_MINTS = {
     "So11111111111111111111111111111111111111112",   # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+}
+
+# Exchanges centralizados que se informan: id de mercado en CoinGecko → nombre
+CEX_CONOCIDOS = {
+    "binance": "Binance", "gdax": "Coinbase", "okex": "OKX", "bybit_spot": "Bybit", "kraken": "Kraken",
+    "kucoin": "KuCoin", "gate": "Gate", "bitget": "Bitget", "mxc": "MEXC", "huobi": "HTX",
 }
 
 
@@ -107,6 +113,37 @@ def mercado(mints: list[str]) -> dict[str, dict]:
                 m.update(liq=liq, par=p["pairAddress"], dex=p.get("dexId"),
                          precio=float(p.get("priceUsd") or 0), fdv=p.get("fdv"))
     return out
+
+
+def dexes(mint: str) -> dict[str, float]:
+    """{dex: liquidez USD} con todos los pools del token (/tokens/v1 trae solo el principal). Sin
+    los que no informan liquidez, como la curva de pump.fun. {} si no se pudo consultar."""
+    try:
+        pares = _get("ds", f"{config.DEXSCREENER_API}/token-pairs/v1/solana/{mint}", intentos=1)
+    except requests.exceptions.RequestException:
+        return {}
+    out: dict[str, float] = {}
+    for p in pares or []:
+        liq = float((p.get("liquidity") or {}).get("usd") or 0)
+        if liq and p["baseToken"]["address"] == mint:
+            dex = p.get("dexId") or "?"
+            out[dex] = out.get(dex, 0.0) + liq
+    return out
+
+
+# ── CoinGecko ─────────────────────────────────────────────────────────────────
+
+def cex(mint: str) -> list[str] | None:
+    """CEX conocidos donde cotiza el token. [] si CoinGecko no lo lista (lo normal en un token
+    recién graduado), None si no se pudo consultar. Un solo intento: una falla no frena el aviso."""
+    try:
+        d = _get("cg", f"{config.COINGECKO_API}/coins/solana/contract/{mint}", intentos=1)
+    except requests.exceptions.HTTPError as e:
+        return [] if e.response.status_code == 404 else None
+    except requests.exceptions.RequestException:
+        return None
+    mercados = {(t.get("market") or {}).get("identifier") for t in d.get("tickers") or []}
+    return [nombre for id_cg, nombre in CEX_CONOCIDOS.items() if id_cg in mercados]
 
 
 # ── RugCheck ──────────────────────────────────────────────────────────────────
