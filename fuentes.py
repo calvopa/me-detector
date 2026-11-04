@@ -72,11 +72,12 @@ def descubrir() -> set[str]:
     return mints
 
 
-def velas(pool: str, desde_s: int, hasta_s: int) -> list[dict]:
-    """Velas de 15 min del pool entre desde_s y hasta_s (precio del token base en USD)."""
+def velas(pool: str, mint: str, desde_s: int, hasta_s: int) -> list[dict]:
+    """Velas de 15 min del pool entre desde_s y hasta_s (precio del token en USD). Se pide por mint
+    porque el "base" de GeckoTerminal puede ser el otro token del pool."""
     n = min(1000, int((hasta_s - desde_s) / 900) + 2)
     d = _get("gt", f"{config.GECKOTERMINAL_API}/networks/solana/pools/{pool}/ohlcv/minute",
-             {"aggregate": 15, "before_timestamp": hasta_s, "limit": n})
+             {"aggregate": 15, "before_timestamp": hasta_s, "limit": n, "token": mint})
     lista = d["data"]["attributes"]["ohlcv_list"]
     return [{"t": v[0], "o": v[1], "h": v[2], "l": v[3], "c": v[4]}
             for v in sorted(lista) if v[0] + 900 > desde_s]
@@ -84,9 +85,32 @@ def velas(pool: str, desde_s: int, hasta_s: int) -> list[dict]:
 
 # ── DexScreener ───────────────────────────────────────────────────────────────
 
+def _sumar_par(out: dict[str, dict], p: dict):
+    """Suma el par a las métricas de su token. Liquidez solo de pares que la informan (las curvas
+    de bonding no la informan)."""
+    mint = p["baseToken"]["address"]
+    m = out.setdefault(mint, {"mint": mint, "symbol": p["baseToken"].get("symbol"),
+                              "name": p["baseToken"].get("name"), "liq": 0.0, "vol_h1": 0.0,
+                              "buys_h1": 0, "sells_h1": 0, "creado_ms": None, "par": None, "liq_dex": {}})
+    h1 = (p.get("txns") or {}).get("h1") or {}
+    m["vol_h1"] += float((p.get("volume") or {}).get("h1") or 0)
+    m["buys_h1"] += int(h1.get("buys") or 0)
+    m["sells_h1"] += int(h1.get("sells") or 0)
+    if p.get("pairCreatedAt"):
+        m["creado_ms"] = min(m["creado_ms"] or p["pairCreatedAt"], p["pairCreatedAt"])
+    liq = float((p.get("liquidity") or {}).get("usd") or 0)
+    if liq:
+        dex = p.get("dexId") or "?"
+        m["liq_dex"][dex] = m["liq_dex"].get(dex, 0.0) + liq
+    if liq > m["liq"]:
+        # el par con más liquidez manda el precio, el FDV y el pool que se sigue
+        m.update(liq=liq, par=p["pairAddress"], dex=p.get("dexId"),
+                 precio=float(p.get("priceUsd") or 0), fdv=p.get("fdv"))
+
+
 def mercado(mints: list[str]) -> dict[str, dict]:
-    """{mint: métricas} sumando todos los pares del token. Liquidez solo de pares que la informan
-    (las curvas de bonding no la informan)."""
+    """{mint: métricas} en lote. Este endpoint trae un solo par por token, el principal: alcanza
+    para descartar y para el seguimiento; para decidir un aviso, ver token_completo()."""
     out: dict[str, dict] = {}
     for i in range(0, len(mints), 30):
         lote = mints[i:i + 30]
@@ -95,40 +119,18 @@ def mercado(mints: list[str]) -> dict[str, dict]:
         except requests.exceptions.RequestException:
             continue
         for p in pares or []:
-            mint = p["baseToken"]["address"]
-            if mint not in lote:
-                continue  # el token aparece como cotización de otro par
-            m = out.setdefault(mint, {"mint": mint, "symbol": p["baseToken"].get("symbol"),
-                                      "name": p["baseToken"].get("name"), "liq": 0.0, "vol_h1": 0.0,
-                                      "buys_h1": 0, "sells_h1": 0, "creado_ms": None, "par": None})
-            h1 = (p.get("txns") or {}).get("h1") or {}
-            m["vol_h1"] += float((p.get("volume") or {}).get("h1") or 0)
-            m["buys_h1"] += int(h1.get("buys") or 0)
-            m["sells_h1"] += int(h1.get("sells") or 0)
-            if p.get("pairCreatedAt"):
-                m["creado_ms"] = min(m["creado_ms"] or p["pairCreatedAt"], p["pairCreatedAt"])
-            liq = float((p.get("liquidity") or {}).get("usd") or 0)
-            if liq > m["liq"]:
-                # el par con más liquidez manda el precio, el FDV y el pool que se sigue
-                m.update(liq=liq, par=p["pairAddress"], dex=p.get("dexId"),
-                         precio=float(p.get("priceUsd") or 0), fdv=p.get("fdv"))
+            if p["baseToken"]["address"] in lote:  # si no, aparece como cotización de otro par
+                _sumar_par(out, p)
     return out
 
 
-def dexes(mint: str) -> dict[str, float]:
-    """{dex: liquidez USD} con todos los pools del token (/tokens/v1 trae solo el principal). Sin
-    los que no informan liquidez, como la curva de pump.fun. {} si no se pudo consultar."""
-    try:
-        pares = _get("ds", f"{config.DEXSCREENER_API}/token-pairs/v1/solana/{mint}", intentos=1)
-    except requests.exceptions.RequestException:
-        return {}
-    out: dict[str, float] = {}
-    for p in pares or []:
-        liq = float((p.get("liquidity") or {}).get("usd") or 0)
-        if liq and p["baseToken"]["address"] == mint:
-            dex = p.get("dexId") or "?"
-            out[dex] = out.get(dex, 0.0) + liq
-    return out
+def token_completo(mint: str) -> dict | None:
+    """Métricas sumando todos los pares del token, curva incluida. None si no tiene pares."""
+    out: dict[str, dict] = {}
+    for p in _get("ds", f"{config.DEXSCREENER_API}/token-pairs/v1/solana/{mint}") or []:
+        if p["baseToken"]["address"] == mint:
+            _sumar_par(out, p)
+    return out.get(mint)
 
 
 # ── CoinGecko ─────────────────────────────────────────────────────────────────

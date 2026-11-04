@@ -6,6 +6,10 @@ load_dotenv()
 
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "180"))
 
+# Subir al cambiar filtros o medición: las estadísticas solo mezclan avisos de la misma versión.
+# v1: hasta 04/11/2026 (velas invertidas en algunos pools, máximos con la vela previa al aviso).
+FILTROS_V = 2
+
 # ── Filtro de mercado (DexScreener) ──
 # Edad del token = el par más viejo (la curva de pump.fun cuenta): de 30 min a 24 h.
 MIN_AGE_MIN = float(os.getenv("MIN_AGE_MIN", "30"))
@@ -15,6 +19,8 @@ MIN_LIQ_USD = float(os.getenv("MIN_LIQ_USD", "30000"))
 MIN_VOL_H1_USD = float(os.getenv("MIN_VOL_H1_USD", "50000"))
 # Ventas en la última hora: si nadie vende puede ser un honeypot
 MIN_SELLS_H1 = int(os.getenv("MIN_SELLS_H1", "20"))
+# Muchas compras por cada venta (última hora): posible honeypot. En vivo lo normal fue 1 a 2,4.
+MAX_COMPRAS_POR_VENTA = float(os.getenv("MAX_COMPRAS_POR_VENTA", "5"))
 
 # ── Filtro de seguridad (RugCheck) ──
 MIN_HOLDERS = int(os.getenv("MIN_HOLDERS", "300"))

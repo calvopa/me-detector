@@ -40,12 +40,19 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
 """
 
+# Columnas agregadas después de crear la tabla: los avisos previos quedan como versión 1
+COLUMNAS_NUEVAS = {"filtros_v": "INTEGER NOT NULL DEFAULT 1", "buys_h1": "INTEGER", "sells_h1": "INTEGER"}
+
 
 def connect(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(str(path))
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
+    existentes = {r["name"] for r in con.execute("PRAGMA table_info(alerts)")}
+    for col, tipo in COLUMNAS_NUEVAS.items():
+        if col not in existentes:
+            con.execute(f"ALTER TABLE alerts ADD COLUMN {col} {tipo}")
     return con
 
 

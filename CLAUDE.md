@@ -17,8 +17,10 @@ en ejecutar. Nació el 30/10/2026 (ver nota `Personal/CryptoBot/Detector de meme
 ```
 descubrir()  GeckoTerminal: new_pools (3 págs) + trending_pools 1h (2 págs) + PumpSwap por tx 24h (2 págs)
     └── mints nuevos → tabla watch (se borran a las MAX_AGE_H + 1h)
-mercado()    DexScreener /tokens/v1/solana (lotes de 30): liquidez, vol 1h, compras/ventas, edad
-    └── filtro_mercado: edad 30min–24h, liq ≥ $30k, vol 1h ≥ $50k, ≥ 20 ventas 1h
+mercado()    DexScreener /tokens/v1/solana (lotes de 30): el par principal de cada token
+    └── prefiltro_mercado: no más de 24h, liq ≥ $30k
+token_completo()  DexScreener /token-pairs/v1/solana: todos los pares, solo de los que sobreviven
+    └── filtro_mercado: edad 30min–24h, liq ≥ $30k, vol 1h ≥ $50k, ≥ 20 ventas 1h, ≤ 5 compras por venta
 seguridad()  RugCheck /tokens/{mint}/report (cacheado RUGCHECK_TTL_MIN)
     └── filtro_seguridad: sin mint/freeze authority, sin riesgos "danger", ≥ 300 holders,
         top10 ≤ 30% (sin contar cuentas AMM/LOCKER de knownAccounts), no rugged
@@ -54,13 +56,28 @@ liquidez el costo real de entrar y salir es varios %. Leerlos como cota superior
 - **Primer ciclo**: avisa de golpe los tokens de < 24h que ya cumplían (en la prueba local, 4).
   No se hizo baseline porque esos avisos también sirven como datos.
 
+## Versiones de filtros (`FILTROS_V`)
+
+Cada aviso guarda la versión con la que salió (`filtros_v`), y `estadisticas()` no mezcla versiones:
+Telegram y el dashboard muestran la actual, `status.json` también trae la anterior en
+`estadisticas_anteriores`. **Subir `FILTROS_V` al cambiar filtros o cómo se mide.** Cambiar un umbral
+en `.env` no la sube sola.
+
+- **v1 (hasta 04/11/2026)**: mediana a 24h -99%, 83% de rugs. Sus números tienen dos errores que no
+  se reescribieron: velas de otro token en algunos pools de Raydium (XDG: +206M%, porque el "base" de
+  GeckoTerminal era wXMR) y máximos tomados de la vela del aviso, anterior al aviso (NODF: +10.948%).
+  La edad y el volumen salían de un solo par porque `tokens/v1` no trae más.
+- **v2 (desde 04/11/2026)**: velas por mint, extremos solo de velas enteras tras el aviso, métricas
+  con todos los pares y tope de compras por venta (`MAX_COMPRAS_POR_VENTA`, sin backtest: el historial
+  no guardaba compras/ventas; desde v2 sí, para calibrarlo).
+
 ## APIs (todas públicas, sin clave — probadas en vivo el 30/10/2026)
 
 | API | Uso | Límite / gotcha |
 |---|---|---|
-| GeckoTerminal `api.geckoterminal.com/api/v2` | descubrimiento + velas OHLCV | ~30/min (429 al pasarse; throttle 2.2s). `new_pools` hasta página 10. Velas: `/pools/{pool}/ohlcv/minute?aggregate=15&before_timestamp=…`, más nueva primero |
+| GeckoTerminal `api.geckoterminal.com/api/v2` | descubrimiento + velas OHLCV | ~30/min (429 al pasarse; throttle 2.2s). `new_pools` hasta página 10. Velas: `/pools/{pool}/ohlcv/minute?aggregate=15&before_timestamp=…&token={mint}`, más nueva primero; sin `token` devuelve el "base" de GeckoTerminal, que puede ser el otro token |
 | DexScreener `api.dexscreener.com/tokens/v1/solana/{mints}` | métricas, hasta 30 mints por llamada | 300/min. Un mint puede aparecer como *quote* de otro par: filtrar por `baseToken.address`. Devuelve **un solo par por token** (visto el 04/11/2026) |
-| DexScreener `api.dexscreener.com/token-pairs/v1/solana/{mint}` | todos los pools del token, para la línea DEX del aviso | hasta 30 pools; incluye la curva (`pumpfun`, sin liquidez) |
+| DexScreener `api.dexscreener.com/token-pairs/v1/solana/{mint}` | todos los pools del token: edad, volumen y compras/ventas para decidir el aviso, y línea DEX | hasta 30 pools; incluye la curva (`pumpfun`, sin liquidez). ~65 llamadas por ciclo |
 | RugCheck `api.rugcheck.xyz/v1/tokens/{mint}/report` | seguridad | sin límite documentado; throttle 1.5s y caché de 30 min por token |
 | CoinGecko `api.coingecko.com/api/v3/coins/solana/contract/{mint}` | CEX del aviso (solo los de `CEX_CONOCIDOS`) | sin clave ~10/min (429 → "CEX: sin dato"; throttle 6s, un intento). 404 = no listado → "CEX: ninguno" |
 
@@ -74,7 +91,7 @@ liquidez el costo real de entrar y salir es varios %. Leerlos como cota superior
 | Volumen | `memedetector_data` → `/data` (`detector.db` WAL, `alerts.csv`, `status.json`, `heartbeat`, `detector.log`) |
 | GitHub | `github.com/calvopa/me-detector` (privado) |
 
-Carga mínima: ~10 llamadas HTTP por ciclo de 3 min + SQLite.
+Carga: la lista `watch` ronda 16.000 tokens → ~550 lotes a DexScreener y ciclos reales de ~5 min, no 3 (medido 04/11/2026).
 
 ## Telegram
 

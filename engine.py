@@ -10,8 +10,18 @@ import fuentes
 HORIZONTE_COL = {1: "r1h", 6: "r6h", 24: "r24h", 168: "r7d"}
 
 
+def prefiltro_mercado(m: dict, ahora_ms: int) -> str | None:
+    """Descarte barato con el par principal, para no pedir todos los pares de miles de tokens. Solo
+    lo que sumar pares no puede revertir: la edad únicamente sube y la liquidez es la del mayor par."""
+    if m.get("creado_ms") and (ahora_ms - m["creado_ms"]) / 60_000 > config.MAX_AGE_H * 60:
+        return "muy viejo"
+    if m["liq"] < config.MIN_LIQ_USD:
+        return "poca liquidez"
+    return None
+
+
 def filtro_mercado(m: dict, ahora_ms: int) -> str | None:
-    """None si pasa; si no, el motivo (para calibrar los umbrales después)."""
+    """Con todos los pares del token. None si pasa; si no, el motivo (para calibrar los umbrales después)."""
     if not m.get("creado_ms"):
         return "sin fecha"
     edad_min = (ahora_ms - m["creado_ms"]) / 60_000
@@ -25,6 +35,8 @@ def filtro_mercado(m: dict, ahora_ms: int) -> str | None:
         return "poco volumen"
     if m["sells_h1"] < config.MIN_SELLS_H1:
         return "pocas ventas"
+    if m["buys_h1"] > m["sells_h1"] * config.MAX_COMPRAS_POR_VENTA:
+        return "casi sin ventas"
     return None
 
 
@@ -74,13 +86,16 @@ def cerrar_horizontes(con, ahora_ms: int):
         for a in pendientes:
             desde, hasta = a["ts"] // 1000, a["ts"] // 1000 + h * 3600
             try:
-                vs = fuentes.velas(a["pool"], desde, hasta)
+                vs = fuentes.velas(a["pool"], a["mint"], desde, hasta)
             except Exception:
                 vs = []
             if vs:
                 cierre = vs[-1]["c"]
-                pmax = max([v["h"] for v in vs] + [a["precio_max"] or 0])
-                pmin = min([v["l"] for v in vs] + [a["precio_min"] or cierre])
+                # extremos solo de velas enteras tras el aviso: la vela del aviso arranca antes
+                # y puede traer un precio que ya no existía al avisar
+                post = [v for v in vs if v["t"] >= desde]
+                pmax = max([v["h"] for v in post] + [a["precio_max"] or 0])
+                pmin = min([v["l"] for v in post] + [a["precio_min"] or cierre])
             elif ahora_ms > a["ts"] + (h + 24) * 3_600_000:
                 # el pool ya no tiene velas (liquidez retirada): se cierra con el último precio visto
                 cierre, pmax, pmin = a["ultimo"], a["precio_max"], a["precio_min"]
@@ -91,20 +106,23 @@ def cerrar_horizontes(con, ahora_ms: int):
                 (_pct(cierre, a["precio"]), pmax, pmin, _pct(pmax, a["precio"]), _pct(pmin, a["precio"]), a["id"]))
 
 
-def estadisticas(con) -> dict:
-    """Resumen para Telegram y el dashboard. Rug % sobre avisos con más de 24h."""
+def estadisticas(con, version: int = config.FILTROS_V) -> dict:
+    """Resumen para Telegram y el dashboard, solo de una versión de filtros. Rug % sobre avisos
+    con más de 24h."""
     ahora_ms = int(time.time() * 1000)
-    out = {"avisos": con.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]}
+    fila = con.execute("SELECT COUNT(*), MIN(ts) FROM alerts WHERE filtros_v=?", (version,)).fetchone()
+    out = {"filtros_v": version, "desde_ms": fila[1], "avisos": fila[0]}
     for h, col in HORIZONTE_COL.items():
-        rs = [r[0] for r in con.execute(f"SELECT {col} FROM alerts WHERE {col} IS NOT NULL")]
+        rs = [r[0] for r in con.execute(f"SELECT {col} FROM alerts WHERE {col} IS NOT NULL AND filtros_v=?",
+                                        (version,))]
         out[col] = {
             "n": len(rs),
             "mediana": round(statistics.median(rs), 1) if rs else None,
             "promedio": round(statistics.fmean(rs), 1) if rs else None,
             "positivos_pct": round(100 * sum(r > 0 for r in rs) / len(rs)) if rs else None,
         }
-    viejos = con.execute("SELECT rug_ts, max_pct FROM alerts WHERE ts < ?",
-                         (ahora_ms - 24 * 3_600_000,)).fetchall()
+    viejos = con.execute("SELECT rug_ts, max_pct FROM alerts WHERE ts < ? AND filtros_v=?",
+                         (ahora_ms - 24 * 3_600_000, version)).fetchall()
     out["rug_pct_24h"] = round(100 * sum(bool(v["rug_ts"]) for v in viejos) / len(viejos)) if viejos else None
     out["x2_pct"] = round(100 * sum((v["max_pct"] or 0) >= 100 for v in viejos) / len(viejos)) if viejos else None
     return out

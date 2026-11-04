@@ -41,7 +41,8 @@ HEARTBEAT_FILE = _RUNTIME / "heartbeat"
 ART = timezone(timedelta(hours=-3))
 
 CSV_COLS = ["ts", "symbol", "name", "mint", "pool", "dex", "precio", "liq", "vol_h1", "fdv", "holders",
-            "top10", "edad_min", "r1h", "r6h", "r24h", "r7d", "max_pct", "min_pct", "rug_ts"]
+            "top10", "edad_min", "r1h", "r6h", "r24h", "r7d", "max_pct", "min_pct", "rug_ts",
+            "filtros_v", "buys_h1", "sells_h1"]
 DEX_NOMBRES = {"pumpswap": "PumpSwap", "raydium": "Raydium", "meteora": "Meteora", "orca": "Orca"}
 
 
@@ -81,8 +82,8 @@ def _pct(x):
     return "—" if x is None else f"{x:+.0f}%"
 
 
-def _dexes(liq_dex: dict[str, float]) -> str:
-    orden = sorted(liq_dex.items(), key=lambda d: -d[1])
+def _dexes(m: dict) -> str:
+    orden = sorted(m["liq_dex"].items(), key=lambda d: -d[1])
     return " · ".join(f"{html.escape(DEX_NOMBRES.get(dex, dex))} {_usd(liq)}" for dex, liq in orden)
 
 
@@ -92,14 +93,14 @@ def _cex(cex: list[str] | None) -> str:
     return ", ".join(cex) or "ninguno"
 
 
-def texto_aviso(m: dict, s: dict, edad_min: float, liq_dex: dict[str, float], cex: list[str] | None) -> str:
+def texto_aviso(m: dict, s: dict, edad_min: float, cex: list[str] | None) -> str:
     sym = html.escape(m.get("symbol") or "?")
     nombre = html.escape(m.get("name") or "")
     avisos = f"\n⚠️ {html.escape(', '.join(s['warns']))}" if s["warns"] else ""
     return (
         f"🔎 <b>Memecoin: ${sym}</b> — {nombre}\n"
         f"Edad {edad_min / 60:.1f}h\n"
-        f"DEX: {_dexes(liq_dex)}\n"
+        f"DEX: {_dexes(m)}\n"
         f"CEX: {_cex(cex)}\n"
         f"Liquidez {_usd(m['liq'])} · Vol 1h {_usd(m['vol_h1'])} · FDV {_usd(m.get('fdv'))}\n"
         f"Compras/ventas 1h: {m['buys_h1']}/{m['sells_h1']}\n"
@@ -115,9 +116,11 @@ def texto_aviso(m: dict, s: dict, edad_min: float, liq_dex: dict[str, float], ce
 def texto_resumen(con) -> str:
     st = engine.estadisticas(con)
     desde = int((time.time() - 86_400) * 1000)
-    ayer = con.execute("SELECT symbol, r1h, max_pct, rug_ts FROM alerts WHERE ts >= ? ORDER BY ts",
-                       (desde,)).fetchall()
+    ayer = con.execute("SELECT symbol, r1h, max_pct, rug_ts FROM alerts WHERE ts >= ? AND filtros_v=? ORDER BY ts",
+                       (desde, config.FILTROS_V)).fetchall()
+    inicio = f" desde {datetime.fromtimestamp(st['desde_ms'] / 1000, ART):%d/%m}" if st["desde_ms"] else ""
     lineas = [f"📊 <b>Detector de memecoins — resumen {datetime.now(ART):%d/%m}</b>",
+              f"Filtros v{config.FILTROS_V}{inicio}",
               f"Avisos últimas 24h: {len(ayer)} · total: {st['avisos']}"]
     for a in ayer[:15]:
         rug = " 🪤rug" if a["rug_ts"] else ""
@@ -147,7 +150,14 @@ def evaluar(con, ahora_ms: int) -> dict:
 
     for mint in pendientes:
         m = mercado.get(mint)
-        motivo = engine.filtro_mercado(m, ahora_ms) if m else "sin pares"
+        motivo = engine.prefiltro_mercado(m, ahora_ms) if m else "sin pares"
+        if motivo is None:
+            try:
+                m = fuentes.token_completo(mint) or m
+            except Exception:
+                embudo["error pares"] += 1
+                continue
+            motivo = engine.filtro_mercado(m, ahora_ms)
         if motivo is None:
             embudo["pasan_mercado"] += 1
             w = con.execute("SELECT rc_ts, motivo FROM watch WHERE mint=?", (mint,)).fetchone()
@@ -174,16 +184,14 @@ def avisar(con, m: dict, s: dict, ahora_ms: int):
     edad_min = (ahora_ms - m["creado_ms"]) / 60_000
     con.execute(
         "INSERT OR IGNORE INTO alerts(mint, symbol, name, ts, pool, dex, precio, liq, vol_h1, fdv, holders,"
-        " top10, edad_min, precio_max, precio_min, ultimo, ultima_liq)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " top10, edad_min, precio_max, precio_min, ultimo, ultima_liq, filtros_v, buys_h1, sells_h1)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (m["mint"], m.get("symbol"), m.get("name"), ahora_ms, m["par"], m.get("dex"), m["precio"], m["liq"],
          m["vol_h1"], m.get("fdv"), s["holders"], s["top10"], round(edad_min), m["precio"], m["precio"],
-         m["precio"], m["liq"]))
+         m["precio"], m["liq"], config.FILTROS_V, m["buys_h1"], m["sells_h1"]))
     log.info("Aviso: %s %s liq=%.0f vol1h=%.0f holders=%s top10=%s", m.get("symbol"), m["mint"],
              m["liq"], m["vol_h1"], s["holders"], s["top10"])
-    # si falla la consulta de pools, al menos el DEX principal que ya se conoce
-    liq_dex = fuentes.dexes(m["mint"]) or {m.get("dex") or "?": m["liq"]}
-    telegram(texto_aviso(m, s, edad_min, liq_dex, fuentes.cex(m["mint"])))
+    telegram(texto_aviso(m, s, edad_min, fuentes.cex(m["mint"])))
 
 
 def escribir_salidas(con, embudo: dict):
@@ -200,10 +208,11 @@ def escribir_salidas(con, embudo: dict):
         "actualizado": datetime.now(ART).isoformat(timespec="seconds"),
         "embudo": embudo,
         "estadisticas": engine.estadisticas(con),
+        "estadisticas_anteriores": engine.estadisticas(con, config.FILTROS_V - 1),
         "recientes": recientes,
         "filtros": {k: getattr(config, k) for k in (
-            "MIN_AGE_MIN", "MAX_AGE_H", "MIN_LIQ_USD", "MIN_VOL_H1_USD", "MIN_SELLS_H1",
-            "MIN_HOLDERS", "MAX_TOP10_PCT")},
+            "FILTROS_V", "MIN_AGE_MIN", "MAX_AGE_H", "MIN_LIQ_USD", "MIN_VOL_H1_USD", "MIN_SELLS_H1",
+            "MAX_COMPRAS_POR_VENTA", "MIN_HOLDERS", "MAX_TOP10_PCT")},
     }, indent=2, ensure_ascii=False, default=str))
 
 
